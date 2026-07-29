@@ -4,6 +4,8 @@
 
 Unofficial FreeBSD x64 builds of [uWebSockets.js](https://github.com/uNetworking/uWebSockets.js), a scalable WebSocket and HTTP server for Node.js.
 
+This project continues the work of [louwers/uws-freebsd](https://github.com/louwers/uws-freebsd).
+
 This project is not affiliated with uWebSockets.js, and FreeBSD remains an unsupported upstream platform.
 
 ## Automated releases
