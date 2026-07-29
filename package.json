@@ -1,12 +1,7 @@
 {
-  "name": "@louwers/bws.js",
-  "version": "0.0.2",
-  "license": "Apache-2.0",
-  "main": "uws.js",
-  "types": "./index.d.ts",
-  "exports": {
-    "import": "./ESM_wrapper.mjs",
-    "require": "./uws.js",
-    "types": "./index.d.ts"
-  }
+  "name": "uwebsocket-freebsd",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Automated FreeBSD builds of uWebSockets.js native addons",
+  "license": "Apache-2.0"
 }

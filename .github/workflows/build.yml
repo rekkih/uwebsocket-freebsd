@@ -1,0 +1,190 @@
+name: Build FreeBSD releases
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Upstream uWebSockets.js version, such as v20.69.0; defaults to latest
+        required: false
+        type: string
+      force:
+        description: Rebuild and replace assets when the release already exists
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: freebsd-release-${{ github.event.inputs.version || 'latest' }}
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Discover upstream release
+    runs-on: ubuntu-latest
+    outputs:
+      should-build: ${{ steps.release.outputs.should-build }}
+      source-commit: ${{ steps.release.outputs.source-commit }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Resolve version and source
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE_BUILD: ${{ inputs.force }}
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -eu
+
+          version=$REQUESTED_VERSION
+          if [ -z "$version" ]; then
+            version=$(curl --fail --silent --show-error \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/uNetworking/uWebSockets.js/releases/latest \
+              | jq --raw-output .tag_name)
+          fi
+
+          case "$version" in
+            v*) ;;
+            *) version="v$version" ;;
+          esac
+
+          source_commit=$(curl --fail --silent --show-error \
+            "https://raw.githubusercontent.com/uNetworking/uWebSockets.js/$version/source_commit")
+
+          if ! printf '%s\n' "$source_commit" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Invalid source commit for $version: $source_commit" >&2
+            exit 1
+          fi
+
+          should_build=true
+          if [ "$EVENT_NAME" != "pull_request" ] && [ "$FORCE_BUILD" != "true" ]; then
+            status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$version")
+
+            case "$status" in
+              200) should_build=false ;;
+              404) ;;
+              *)
+                echo "GitHub release lookup failed with HTTP $status" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source-commit=$source_commit" >> "$GITHUB_OUTPUT"
+          echo "should-build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "Version: $version"
+          echo "Source commit: $source_commit"
+          echo "Build required: $should_build"
+
+  build:
+    name: Build on FreeBSD x64
+    needs: discover
+    if: needs.discover.outputs.should-build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      SOURCE_COMMIT: ${{ needs.discover.outputs.source-commit }}
+      UWS_VERSION: ${{ needs.discover.outputs.version }}
+    steps:
+      - name: Check out build project
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Build and smoke-test in FreeBSD
+        uses: vmactions/freebsd-vm@77ed28d336d03fe19a3f4f7266c1d2c4714dd79d # v1.5.2
+        with:
+          release: "15.0"
+          arch: x86_64
+          usesh: true
+          sync: rsync
+          copyback: true
+          cache-after-prepare: true
+          envs: SOURCE_COMMIT UWS_VERSION
+          prepare: |
+            pkg install -y cmake curl git libuv node24 npm-node24
+          run: |
+            set -eu
+
+            git clone --recursive https://github.com/uNetworking/uWebSockets.js.git
+            cd uWebSockets.js
+            git checkout --detach "$SOURCE_COMMIT"
+            git submodule update --init --recursive
+
+            if [ ! -f build.c ]; then
+              echo "Upstream build.c is missing at $SOURCE_COMMIT" >&2
+              exit 1
+            fi
+
+            {
+              echo '#define __linux 1'
+              sed \
+                -e 's/#define OS "linux"/#define OS "freebsd"/' \
+                -e 's/clang-[0-9][0-9]*/clang/g' \
+                -e 's/clang++-[0-9][0-9]*/clang++/g' \
+                build.c
+            } > build.c.freebsd
+            mv build.c.freebsd build.c
+
+            make
+
+            if ! find dist -type f -name 'uws_freebsd_x64_*.node' -print -quit | grep -q .; then
+              echo "The build produced no FreeBSD x64 addons" >&2
+              exit 1
+            fi
+
+            cd tests
+            npm install --no-save ws
+            node smoke.js
+            cd ..
+
+            mkdir -p ../artifacts
+            cp dist/uws_freebsd_x64_*.node ../artifacts/
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: uws-freebsd-${{ env.UWS_VERSION }}
+          path: artifacts/uws_freebsd_x64_*.node
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+
+          notes=$(printf '%s\n\n%s' \
+            "FreeBSD x64 build of uWebSockets.js $UWS_VERSION" \
+            "Source commit: https://github.com/uNetworking/uWebSockets.js/commit/$SOURCE_COMMIT")
+
+          if gh release view "$UWS_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$UWS_VERSION" artifacts/*.node \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+            gh release edit "$UWS_VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$UWS_VERSION" \
+              --notes "$notes"
+          else
+            gh release create "$UWS_VERSION" artifacts/*.node \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$UWS_VERSION" \
+              --notes "$notes"
+          fi

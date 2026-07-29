@@ -5,3 +5,7 @@ actionlint
 node_modules/
 dist/
 *.node
+
+# CI working directories
+artifacts/
+uWebSockets.js/
